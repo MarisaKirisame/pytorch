@@ -361,6 +361,83 @@ class TestScriptPy3(JitTestCase):
                     # type: (Tensor) -> Tensor
                     return 3 * x
 
+    def test_module_interface_swap(self):
+        @torch.jit.interface
+        class ModuleInterface(nn.Module):
+            def forward(self, input):
+                # type: (Tensor) -> Tensor
+                pass
+
+        class OrigModule(nn.Module):
+            def __init__(self):
+                super(OrigModule, self).__init__()
+
+            def forward(self, input):
+                # type: (Tensor) -> Tensor
+                return input + 5
+
+        class NewModule(nn.Module):
+            def __init__(self):
+                super(NewModule, self).__init__()
+
+            def forward(self, input):
+                # type: (Tensor) -> Tensor
+                return input + 1
+
+        class NewModuleWrong(nn.Module):
+            def __init__(self):
+                super(NewModuleWrong, self).__init__()
+
+            def forward(self, input):
+                # type: (int) -> int
+                return input + 1
+
+        class TestModule(nn.Module):
+            proxy_mod : ModuleInterface
+
+            def __init__(self):
+                super(TestModule, self).__init__()
+                self.proxy_mod = OrigModule()
+
+            def forward(self, input):
+                # type: (Tensor) -> Tensor
+                return self.proxy_mod.forward(input)
+
+
+        scripted_mod = torch.jit.script(TestModule())
+        input = torch.randn(3, 4)
+        self.assertEqual(scripted_mod(input), input + 5)
+
+        # module swap with the same interface
+        scripted_mod.proxy_mod = torch.jit.script(NewModule())
+        self.assertEqual(scripted_mod(input), input + 1)
+
+        # module swap with in-compatible interface
+        with self.assertRaisesRegex(RuntimeError, "is not compatible with interface"):
+            scripted_mod.proxy_mod = torch.jit.script(NewModuleWrong())
+
+        # module swap with non-scripted module
+        with self.assertRaisesRegex(RuntimeError, "a ScriptModule with non-scripted module"):
+            scripted_mod.proxy_mod = NewModuleWrong()
+
+        # test module swapping with no module interface
+        class TestNoModuleInterface(nn.Module):
+            def __init__(self):
+                super(TestNoModuleInterface, self).__init__()
+                self.proxy_mod = OrigModule()
+
+            def forward(self, input):
+                # type: (Tensor) -> Tensor
+                return self.proxy_mod(input)
+
+        scripted_no_module_interface = torch.jit.script(TestNoModuleInterface())
+        # proxy mod is swapped with the new ScriptModule that share the same JIT type, should succeed.
+        scripted_no_module_interface.proxy_mod = torch.jit.script(OrigModule())
+        # proxy_mod is neither a module interface or have the same JIT type, should fail
+        with self.assertRaisesRegex(RuntimeError,
+                                    "Expected a value of type '__torch__.OrigModule' for field " +
+                                    "'proxy_mod', but found '__torch__.NewModule'"):
+            scripted_no_module_interface.proxy_mod = torch.jit.script(NewModule())
 
 if __name__ == '__main__':
     run_tests()
