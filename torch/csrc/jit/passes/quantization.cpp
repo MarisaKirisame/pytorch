@@ -460,7 +460,6 @@ class QuantizeHelper {
 
  private:
   const script::Module& module_;
-  std::vector<std::string> observer_modules_to_remove_;
   std::vector<Node*> nodes_to_destroy_;
 };
 
@@ -468,7 +467,7 @@ void QuantizeHelper::removeObserver(
     Value* v,
     const std::string& observer_name) {
   // remove observer_module
-  observer_modules_to_remove_.push_back(observer_name);
+  module_.type()->removeAttribute(observer_name);
   // remove observer forward call
   for (const Use& u : v->uses()) {
     Node* user = u.user;
