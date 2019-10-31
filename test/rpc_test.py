@@ -639,7 +639,6 @@ class RpcTest(object):
 
     def _stress_test_rpc(self, f, repeat=1000, args=()):
         import time
-
         n = self.rank + 1
         dst_rank = n % self.world_size
         futs = []
@@ -918,6 +917,12 @@ class RpcTest(object):
             "worker{}".format(dst_rank), my_rref_function, args=(rref_a, rref_b)
         )
         self.assertEqual(rref_c.to_here().wait(), torch.ones(n, n) + 4)
+
+    @dist_init(setup_model_parallel=True)
+    @requires_process_group_agent("PROCESS_GROUP rpc backend specific test, skip")
+    def test_get_rpc_timeout(self):
+        timeout = rpc.get_rpc_timeout()
+        self.assertEqual(timeout, rpc.constants.DEFAULT_RPC_TIMEOUT)
 
     def test_requires_process_group_agent_decorator(self):
         @requires_process_group_agent("test_func did not run")
