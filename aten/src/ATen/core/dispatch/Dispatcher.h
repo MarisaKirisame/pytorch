@@ -10,6 +10,55 @@ namespace c10 {
 
 class CAFFE2_API OperatorHandle;
 
+namespace detail {
+
+class KernelTable_ final {
+ public:
+  void set(TensorTypeId key, const KernelFunction& value, const std::string& operator_name) {
+    auto emplaced = map_.emplace(key, value);
+    if (!emplaced.second) {
+      // Element already existed. Overwrite it.
+      emplaced.first->second = value;
+      TORCH_WARN("Registered a kernel for operator ", operator_name," with dispatch key ", toString(key), " that overwrote a previously registered kernel with the same dispatch key for the same operator.");
+    }
+  }
+
+  void removeIfExists(TensorTypeId key, const std::string& operator_name) {
+    auto num_removed = map_.erase(key);
+    TORCH_INTERNAL_ASSERT(num_removed <= 1); // This is not a multi-map
+  }
+
+  const KernelFunction* lookup(TensorTypeId key) const {
+    auto found = map_.find(key);
+    if (found != map_.end()) {
+      return &found->second;
+    } else {
+      return nullptr;
+    }
+  }
+
+  size_t size() const {
+    return map_.size();
+  }
+
+  std::string list_all_dispatch_keys() const {
+    if (map_.size() == 0) {
+      return "[]";
+    }
+    std::ostringstream str;
+    str << "[" << toString(map_.begin()->first);
+    for (auto iter = ++map_.begin(); iter != map_.end(); ++iter) {
+      str << ", " << toString(iter->first);
+    }
+    str << "]";
+    return str.str();
+  }
+
+ private:
+   ska::flat_hash_map<TensorTypeId, KernelFunction> map_;
+};
+} // namespace detail
+
 /**
  * Implement this interface and register your instance with the dispatcher
  * to get notified when operators are registered or deregistered with
@@ -113,6 +162,8 @@ private:
 
   void deregisterSchema_(const OperatorHandle& op, const OperatorName& op_name);
 
+  const KernelFunction& dispatch_(const DispatchTable& dispatchTable, c10::optional<TensorTypeId> dispatch_key) const;
+
   std::list<OperatorDef> operators_;
   LeftRight<ska::flat_hash_map<OperatorName, OperatorHandle>> operatorLookupTable_;
   std::unique_ptr<detail::RegistrationListenerList> listeners_;
@@ -165,18 +216,58 @@ private:
 template<class Return, class... Args>
 inline Return Dispatcher::callUnboxed(const OperatorHandle& op, Args... args) const {
   // note: this doesn't need the mutex because write operations on the list keep iterators intact.
-  return op.operatorIterator_->op.callUnboxed<Return, Args...>(std::forward<Args>(args)...);
+  return op.operatorIterator_->op.readDispatchTable([&] (const DispatchTable& dispatchTable) -> Return {
+    c10::optional<TensorTypeId> dispatchKey = dispatchTable.dispatchKeyExtractor().getDispatchKeyUnboxed(args...);
+    const KernelFunction& kernel = dispatch_(dispatchTable, dispatchKey);
+    return kernel.template callUnboxed<Return, Args...>(std::forward<Args>(args)...);
+  });
 }
 
 template<class Return, class... Args>
 inline Return Dispatcher::callUnboxedOnly(const OperatorHandle& op, Args... args) const {
   // note: this doesn't need the mutex because write operations on the list keep iterators intact.
-  return op.operatorIterator_->op.callUnboxedOnly<Return, Args...>(std::forward<Args>(args)...);
+  return op.operatorIterator_->op.readDispatchTable([&] (const DispatchTable& dispatchTable) -> Return {
+    c10::optional<TensorTypeId> dispatchKey = dispatchTable.dispatchKeyExtractor().getDispatchKeyUnboxed(args...);
+    const KernelFunction& kernel = dispatch_(dispatchTable, dispatchKey);
+    return kernel.template callUnboxedOnly<Return, Args...>(std::forward<Args>(args)...);
+  });
 }
 
 inline void Dispatcher::callBoxed(const OperatorHandle& op, Stack* stack) const {
   // note: this doesn't need the mutex because write operations on the list keep iterators intact.
-  return op.operatorIterator_->op.callBoxed(stack);
+  return op.operatorIterator_->op.readDispatchTable([&] (const DispatchTable& dispatchTable) {
+    c10::optional<TensorTypeId> dispatchKey = dispatchTable.dispatchKeyExtractor().getDispatchKeyBoxed(stack);
+    const KernelFunction& kernel = dispatch_(dispatchTable, dispatchKey);
+    kernel.callBoxed(stack);
+  });
+}
+
+inline const KernelFunction& Dispatcher::dispatch_(const DispatchTable& dispatchTable, c10::optional<TensorTypeId> dispatchKey) const {
+  if (dispatchKey.has_value()) {
+    const KernelFunction* backendKernel = dispatchTable.lookup(*dispatchKey);
+
+    if (nullptr != backendKernel) {
+      return *backendKernel;
+    }
+  }
+
+  const KernelFunction* catchallKernel = dispatchTable.lookupCatchallKernel();
+  if (nullptr != catchallKernel) {
+    return *catchallKernel;
+  }
+
+  if (!dispatchKey.has_value() || *dispatchKey == TensorTypeId::UndefinedTensorId) {
+    TORCH_CHECK(false,
+          "There were no tensor arguments to this function (e.g., you passed an "
+          "empty list of Tensors), but no fallback function is registered for schema ", dispatchTable.operatorName(),
+          ".  This usually means that this function requires a non-empty list of Tensors.  "
+          "Available functions are ", dispatchTable.listAllDispatchKeys())
+  }
+
+  const std::string dispatchKeyStr = dispatchKey.has_value() ? toString(*dispatchKey) : "None";
+  TORCH_CHECK(false, "Didn't find kernel to dispatch to for operator '", dispatchTable.operatorName(),
+           "'. Tried to look up kernel for dispatch key '", dispatchKeyStr,
+           "'. Registered dispatch keys are: ", dispatchTable.listAllDispatchKeys());
 }
 
 } // namespace c10
