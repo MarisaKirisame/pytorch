@@ -248,5 +248,26 @@ Tensor MarginRankingLossImpl::forward(const Tensor& input1,
   return F::margin_ranking_loss(input1, input2, target, options);
 }
 
+// ============================================================================
+
+BCEWithLogitsLossImpl::BCEWithLogitsLossImpl(
+  const BCEWithLogitsLossOptions& options_) : options(options_) {
+  reset();
+}
+
+void BCEWithLogitsLossImpl::reset() {
+  register_buffer("weight", options.weight());
+  register_buffer("pos_weight", options.pos_weight());
+}
+
+void BCEWithLogitsLossImpl::pretty_print(std::ostream& stream) const {
+  stream << "torch::nn::BCEWithLogitsLoss()";
+}
+
+Tensor BCEWithLogitsLossImpl::forward(
+  const Tensor& input, const Tensor& target) {
+  return F::binary_cross_entropy_with_logits(input, target, options);
+}
+
 } // namespace nn
 } // namespace torch
